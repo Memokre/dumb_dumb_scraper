@@ -19,6 +19,11 @@ HEADERS = {
 HASH_FILE = 'scraped_article_hashes.json'
 OUTPUT_FILE = 'yahoo_finance_articles.json'
 
+EUROPEAN_CANADIAN_USA_SUFFIXES = {
+    '.TO', '.V', '.A', '.L', '.PA', '.AS', '.BR', '.DE', '.F', '.MI', 
+    '.SW', '.VX', '.IR', '.IS', '.HE', '.ST', '.CO', '.OL', '.VI', '.ME',
+}
+
 def load_scraped_hashes(filename: str) -> Set[str]:
     """Loads a set of previously scraped hashes from a JSON file."""
     if not os.path.exists(filename):
@@ -45,8 +50,6 @@ def get_page_content(session: requests.Session, url: str) -> Optional[str]:
     except requests.RequestException as e:
         print(f"Error fetching {url}: {e}")
         return None
-
-
 
 def scrape_article_links(base_url: str, headers: dict) -> set[str]:
 
@@ -78,7 +81,27 @@ def scrape_article_links(base_url: str, headers: dict) -> set[str]:
     print(f"Found {len(unique_urls)} unique article links on the front page.")
     return unique_urls
 
-def scrape_article_page(session: requests.Session, url: str) -> Optional[Dict[str, str]]:
+def filter_tickers(raw_text: str) -> list[str]:
+
+    ticker_pattern = re.compile(r'\b[A-Z]{1,5}(?:\.[A-Z]{1,2})?\b')
+    potential_tickers = ticker_pattern.findall(raw_text)
+
+    filtered_tickers = []
+    for ticker in potential_tickers:
+        if '.' in ticker:
+            # Note: Fixed a small typo here from 'EUROPEPEAN_CANADIAN_USA_SUFFIXES'
+            if ticker.upper() in EUROPEAN_CANADIAN_USA_SUFFIXES or ticker.upper() in [f'{ticker.split(".")[0]}.{s.strip(".")}' for s in EUROPEAN_CANADIAN_USA_SUFFIXES]:
+                filtered_tickers.append(ticker)
+            elif any(ticker.upper().endswith(suffix) for suffix in EUROPEAN_CANADIAN_USA_SUFFIXES):
+                filtered_tickers.append(ticker)
+        else:
+            if len(ticker) > 1 and ticker.upper() not in ["THE", "AND", "FOR", "INC", "CO", "LLC"]: 
+                filtered_tickers.append(ticker)
+                
+    return list(set(filtered_tickers))
+
+
+def scrape_article_page(session: requests.Session, url: str) -> Optional[Dict[str, Any]]:
 
     html_content = get_page_content(session, url)
     if not html_content:
@@ -112,7 +135,31 @@ def scrape_article_page(session: requests.Session, url: str) -> Optional[Dict[st
         time_element = soup.select_one('div.byline-attr-time-style time.byline-attr-meta-time')
         updated_time = time_element['datetime'] if time_element and time_element.has_attr('datetime') else "Not Found"
 
-        if title == "Not Found" and author == "Not Found":
+        # --- Highlight: Updated content scraping logic ---
+        # Find the main article body container using the data-testid
+        article_body = soup.find('div', attrs={'data-testid': 'article-body'})
+        
+        content_elements = []
+        if article_body:
+            # Find all <p> tags within that container
+            content_elements = article_body.find_all('p')
+            
+        full_content_paragraphs = [p.get_text(strip=True) for p in content_elements if p.get_text(strip=True)]
+        full_content = "\n".join(full_content_paragraphs)
+        if not full_content:
+            full_content = "Not Found"
+        # --- End of highlighted change ---
+            
+        TICKER_CONTENT_CLASS = "scroll-carousel yf-r5lvmz"
+        ticker_box = soup.find('div', class_=TICKER_CONTENT_CLASS)
+
+        tags_list = []
+        if ticker_box:
+            raw_text = ticker_box.get_text(separator=' ', strip=True)
+            tags_list = sorted(filter_tickers(raw_text))
+
+
+        if title == "Not Found" and author == "Not Found" and full_content == "Not Found":
              print(f"Skipping (likely not an article): {url}")
              return None
 
@@ -121,6 +168,8 @@ def scrape_article_page(session: requests.Session, url: str) -> Optional[Dict[st
             "author": author,
             "published_time_utc": updated_time,
             "article_link": url,
+            "full_content": full_content, 
+            "tags": tags_list          
         }
 
     except Exception as e:
@@ -133,7 +182,7 @@ def main():
     scraped_hashes = load_scraped_hashes(HASH_FILE)
     print(f"Loaded {len(scraped_hashes)} previously scraped article hashes.")
 
-    newly_scraped_data: List[Dict[str, str]] = []
+    newly_scraped_data: List[Dict[str, Any]] = [] 
     new_hashes: Set[str] = set()
 
     article_urls = scrape_article_links(BASE_URL, HEADERS)
