@@ -15,25 +15,18 @@ def ensure_browsers_installed():
         sys.exit(1)
 
 def handle_cookie_popup(page, url):
-    """
-    Navigates to the URL and handles the Yahoo cookie consent popup.
-    """
     print(f"Navigating to {url} to check for cookies...")
     try:
         page.goto(url, timeout=60000)
-        # Wait a moment for the redirect to consent.yahoo.com or popup to render
         page.wait_for_load_state('domcontentloaded')
         time.sleep(2)
 
-        # Look for the "Accept all" button (common on Yahoo consent pages)
-        # We try multiple selectors to be robust
         accept_button = page.locator('button[name="agree"], button:has-text("Accept all")').first
         reject_button = page.locator('button[name="reject"], button:has-text("Reject all")').first
 
         if accept_button.is_visible():
             print("Cookie consent popup detected. Clicking 'Accept all'...")
             accept_button.click()
-            # Removed strict networkidle wait; relying on sleep allows the redirect to process without timeout
             time.sleep(3) 
         elif reject_button.is_visible():
             print("Cookie consent popup detected. Clicking 'Reject all'...")
@@ -53,8 +46,10 @@ def main():
 
     with sync_playwright() as p:
         try:
-            # Headless True to hide the browser window
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(
+                headless=True,
+                args=['--disable-dev-shm-usage', '--no-sandbox', '--disable-gpu']
+            )
         except PlaywrightError as e:
             if "Executable doesn't exist" in str(e):
                 ensure_browsers_installed()
@@ -65,9 +60,15 @@ def main():
         context = browser.new_context(
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         )
+
+        # Removed 'stylesheet' from block list so scrolling works
+        context.route("**/*", lambda route: route.abort() 
+            if route.request.resource_type in ["image", "media", "font"] 
+            else route.continue_()
+        )
+
         page = context.new_page()
 
-        # Handle cookies explicitly before trying to scrape
         handle_cookie_popup(page, BASE_URL)
 
         article_urls = scrape_article_links(page, BASE_URL)
@@ -81,13 +82,16 @@ def main():
         new_count = 0
 
         for url in article_urls:
-            article_data = scrape_article_page(page, url)
-            
-            if article_data:
-                if save_article(article_data, root_dir):
-                    new_count += 1
-                else:
-                    print(f"Duplicate skipped: {url}")
+            try:
+                article_data = scrape_article_page(page, url)
+                
+                if article_data:
+                    if save_article(article_data, root_dir):
+                        new_count += 1
+                    else:
+                        print(f"Duplicate skipped: {url}")
+            except Exception as e:
+                print(f"Skipping {url} due to unexpected error: {e}")
             
             time.sleep(random.uniform(0.5, 1.5))
 

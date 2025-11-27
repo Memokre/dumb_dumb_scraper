@@ -3,12 +3,12 @@ import json
 import hashlib
 import os
 import sys
+import time
 from bs4 import BeautifulSoup
 from typing import Dict, Any, Optional
 from urllib.parse import urljoin
 from datetime import datetime
 
-# Type hinting for Playwright
 try:
     from playwright.sync_api import Page
 except ImportError:
@@ -17,8 +17,6 @@ except ImportError:
 BASE_URL = "https://finance.yahoo.com/"
 SOURCE_SHORT = "yahoo"
 SOURCE_FULL = "finance.yahoo.com"
-
-# HEADERS removed as they are set in the Playwright context in main.py
 
 def get_md5_hash(url: str) -> str:
     return hashlib.md5(url.encode('utf-8')).hexdigest()[-8:]
@@ -43,31 +41,44 @@ def extract_financial_metrics(content: str) -> dict[str, list[str]]:
         "acronyms": acronyms
     }
 
-# Modified to use Playwright Page object
 def get_page_content(page: 'Page', url: str) -> Optional[str]:
     try:
         page.goto(url, timeout=60000)
-        # Wait for DOM to settle - crucial for dynamic scraping
         page.wait_for_load_state('domcontentloaded') 
         return page.content()
     except Exception as e:
         print(f"Error fetching {url}: {e}")
         return None
 
-# Modified to accept Page object
 def scrape_article_links(page: 'Page', base_url: str) -> set[str]:
     try:
-        page.goto(base_url, timeout=60000)
-        page.wait_for_load_state('domcontentloaded')
+        if page.url != base_url:
+            page.goto(base_url, timeout=60000)
+            page.wait_for_load_state('domcontentloaded')
+        
+        print("Scrolling to trigger News Stream lazy loading...")
+        try:
+            for i in range(5):
+                page.keyboard.press("PageDown")
+                time.sleep(1.5)
+            
+            page.keyboard.press("End")
+            time.sleep(2)
+
+            page.wait_for_selector('li.stream-item', state="attached", timeout=20000)
+        except Exception as e:
+            print(f"Warning: Scrolling/Waiting for news stream failed: {e}")
+
         html_content = page.content()
     except Exception as e:
         print(f"Error: Could not retrieve the webpage. {e}", file=sys.stderr)
         return set()
 
     soup = BeautifulSoup(html_content, 'html.parser')
-    target_section = soup.find('section', class_='module-hero hero-3-col yf-1mjoczb')
     unique_urls = set()
 
+    target_section = soup.find('section', class_='module-hero')
+    
     if target_section:
         links = target_section.find_all('a', href=True)
         for link in links:
@@ -76,13 +87,33 @@ def scrape_article_links(page: 'Page', base_url: str) -> set[str]:
             if '/news/' in absolute_url:
                 cleaned_url = absolute_url.split('?')[0]
                 unique_urls.add(cleaned_url)
+    
+    print(f"Found {len(unique_urls)} links in Hero section.")
 
-    print(f"Found {len(unique_urls)} unique article links on the front page.")
+    news_stream = soup.find('div', attrs={'data-testid': 'news-stream'})
+
+    if news_stream:
+        stream_items = news_stream.find_all('li', class_='stream-item')
+        print(f"Found {len(stream_items)} items in News Stream.")
+
+        for item in stream_items:
+            link = item.find('a', href=True)
+            if link:
+                href = link['href']
+                absolute_url = urljoin(base_url, href)
+                
+                # Blacklist check
+                if "noisefreefinance.com" in absolute_url:
+                    continue
+
+                if '/news/' in absolute_url or '/m/' in absolute_url:
+                    cleaned_url = absolute_url.split('?')[0]
+                    unique_urls.add(cleaned_url)
+
+    print(f"Total unique article links found: {len(unique_urls)}")
     return unique_urls
 
-# Modified to accept Page object
 def scrape_article_page(page: 'Page', url: str) -> Optional[Dict[str, Any]]:
-    # Uses the shared Playwright get_page_content wrapper
     html_content = get_page_content(page, url)
     if not html_content:
         return None
